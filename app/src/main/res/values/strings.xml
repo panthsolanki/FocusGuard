@@ -1,5 +1,4 @@
 <resources>
     <string name="app_name">FocusGuard</string>
-    <string name="notification_channel_name">FocusGuard Service</string>
-    <string name="notification_channel_desc">Active monitoring for focus rules and daily limits</string>
+    <string name="accessibility_service_desc">Instantly detects when restricted apps are opened to enforce focus schedules and daily limits without battery-draining polling.</string>
 </resources>

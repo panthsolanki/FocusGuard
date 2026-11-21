@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.TextUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -45,7 +46,7 @@ import com.focusguard.blocker.data.*
 import com.focusguard.blocker.engine.FocusScoreCalculator
 import com.focusguard.blocker.engine.FocusScoreSummary
 import com.focusguard.blocker.engine.ScheduleHelper
-import com.focusguard.blocker.service.AppBlockerService
+import com.focusguard.blocker.service.AppBlockerAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -76,8 +77,9 @@ fun FocusGuardScreen() {
     val rules by dao.observeAllRules().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
 
-    var hasUsageAccess by remember { mutableStateOf(checkUsageAccess(context)) }
+    var isAccessibilityEnabled by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var hasUsageAccess by remember { mutableStateOf(checkUsageAccess(context)) }
 
     var focusSummary by remember {
         mutableStateOf(FocusScoreSummary(score = 100, totalDistractionMinutes = 0L, trackedAppsCount = 0, activeSchedulesCount = 0))
@@ -92,11 +94,9 @@ fun FocusGuardScreen() {
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                hasUsageAccess = checkUsageAccess(context)
+                isAccessibilityEnabled = isAccessibilityServiceEnabled(context)
                 hasOverlayPermission = Settings.canDrawOverlays(context)
-                if (hasUsageAccess) {
-                    AppBlockerService.start(context)
-                }
+                hasUsageAccess = checkUsageAccess(context)
                 scope.launch {
                     focusSummary = withContext(Dispatchers.IO) {
                         FocusScoreCalculator.calculate(context, rules)
@@ -211,11 +211,11 @@ fun FocusGuardScreen() {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
-                    onClick = { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
+                    onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
                 ) {
-                    Text(if (hasUsageAccess) "1. Usage ✓" else "1. Usage", maxLines = 1)
+                    Text(if (isAccessibilityEnabled) "1. Access ✓" else "1. Access", maxLines = 1)
                 }
 
                 OutlinedButton(
@@ -233,14 +233,12 @@ fun FocusGuardScreen() {
                     Text(if (hasOverlayPermission) "2. Overlay ✓" else "2. Overlay", maxLines = 1)
                 }
 
-                Button(
-                    onClick = {
-                        AppBlockerService.start(context)
-                    },
+                OutlinedButton(
+                    onClick = { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
                 ) {
-                    Text(if (AppBlockerService.isRunning) "3. Active ✓" else "3. Start", maxLines = 1)
+                    Text(if (hasUsageAccess) "3. Stats ✓" else "3. Stats", maxLines = 1)
                 }
             }
 
@@ -692,6 +690,24 @@ fun RuleConfigDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+private fun isAccessibilityServiceEnabled(context: Context): Boolean {
+    val expectedServiceName = "${context.packageName}/${AppBlockerAccessibilityService::class.java.name}"
+    val enabledServices = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+    ) ?: return false
+    val colonSplitter = TextUtils.SimpleStringSplitter(':')
+    colonSplitter.setString(enabledServices)
+    while (colonSplitter.hasNext()) {
+        val componentName = colonSplitter.next()
+        if (componentName.equals(expectedServiceName, ignoreCase = true) ||
+            (componentName.contains(context.packageName, ignoreCase = true) && componentName.contains("AppBlockerAccessibilityService", ignoreCase = true))) {
+            return true
+        }
+    }
+    return false
 }
 
 private fun checkUsageAccess(context: Context): Boolean {
