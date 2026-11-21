@@ -240,7 +240,7 @@ fun FocusGuardScreen() {
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
                 ) {
-                    Text("3. Service", maxLines = 1)
+                    Text(if (AppBlockerService.isRunning) "3. Active ✓" else "3. Start", maxLines = 1)
                 }
             }
 
