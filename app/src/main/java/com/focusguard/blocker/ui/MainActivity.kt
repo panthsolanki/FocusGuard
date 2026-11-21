@@ -512,7 +512,7 @@ fun RuleConfigDialog(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        dayOptions.forEach { (label, bit) ->
+                        for ((label, bit) in dayOptions) {
                             val isSelected = bit in selectedDays
                             FilterChip(
                                 selected = isSelected,
@@ -520,8 +520,7 @@ fun RuleConfigDialog(
                                     selectedDays = if (isSelected) selectedDays - bit else selectedDays + bit
                                 },
                                 label = { Text(label, fontSize = 11.sp) },
-                                modifier = Modifier.weight(1f),
-                                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp)
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }
