@@ -1,10 +1,12 @@
 package com.focusguard.blocker.ui
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -30,7 +32,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.focusguard.blocker.data.*
+import com.focusguard.blocker.service.AppBlockerService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,9 +62,29 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun FocusGuardScreen() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val dao = remember { AppDatabase.getInstance(context).blockDao() }
     val rules by dao.observeAllRules().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
+
+    var hasUsageAccess by remember { mutableStateOf(checkUsageAccess(context)) }
+    var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasUsageAccess = checkUsageAccess(context)
+                hasOverlayPermission = Settings.canDrawOverlays(context)
+                if (hasUsageAccess) {
+                    AppBlockerService.start(context)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     var selectedApp by remember { mutableStateOf<InstalledApp?>(null) }
     var searchQuery by remember { mutableStateOf("") }
@@ -103,13 +129,9 @@ fun FocusGuardScreen() {
                     onClick = { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
-                ) { Text("1. Usage", maxLines = 1) }
-
-                OutlinedButton(
-                    onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
-                ) { Text("2. Access", maxLines = 1) }
+                ) {
+                    Text(if (hasUsageAccess) "1. Usage ✓" else "1. Usage", maxLines = 1)
+                }
 
                 OutlinedButton(
                     onClick = {
@@ -122,7 +144,19 @@ fun FocusGuardScreen() {
                     },
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
-                ) { Text("3. Overlay", maxLines = 1) }
+                ) {
+                    Text(if (hasOverlayPermission) "2. Overlay ✓" else "2. Overlay", maxLines = 1)
+                }
+
+                Button(
+                    onClick = {
+                        AppBlockerService.start(context)
+                    },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                ) {
+                    Text("3. Service", maxLines = 1)
+                }
             }
 
             Spacer(Modifier.height(12.dp))
@@ -401,6 +435,25 @@ fun RuleConfigDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+private fun checkUsageAccess(context: Context): Boolean {
+    val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager ?: return false
+    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        appOps.unsafeCheckOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            android.os.Process.myUid(),
+            context.packageName
+        )
+    } else {
+        @Suppress("DEPRECATION")
+        appOps.checkOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            android.os.Process.myUid(),
+            context.packageName
+        )
+    }
+    return mode == AppOpsManager.MODE_ALLOWED
 }
 
 private fun loadInstalledApps(context: Context): List<InstalledApp> {
