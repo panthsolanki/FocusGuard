@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">FocusGuard</string>
+    <string name="accessibility_service_desc">Detects when restricted apps are opened to enforce daily limits and schedules.</string>
+</resources>
