@@ -12,11 +12,15 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
@@ -25,17 +29,22 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.focusguard.blocker.data.*
+import com.focusguard.blocker.engine.FocusScoreCalculator
+import com.focusguard.blocker.engine.FocusScoreSummary
+import com.focusguard.blocker.engine.ScheduleHelper
 import com.focusguard.blocker.service.AppBlockerService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -70,6 +79,16 @@ fun FocusGuardScreen() {
     var hasUsageAccess by remember { mutableStateOf(checkUsageAccess(context)) }
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
 
+    var focusSummary by remember {
+        mutableStateOf(FocusScoreSummary(score = 100, totalDistractionMinutes = 0L, trackedAppsCount = 0, activeSchedulesCount = 0))
+    }
+
+    LaunchedEffect(rules) {
+        focusSummary = withContext(Dispatchers.IO) {
+            FocusScoreCalculator.calculate(context, rules)
+        }
+    }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -77,6 +96,11 @@ fun FocusGuardScreen() {
                 hasOverlayPermission = Settings.canDrawOverlays(context)
                 if (hasUsageAccess) {
                     AppBlockerService.start(context)
+                }
+                scope.launch {
+                    focusSummary = withContext(Dispatchers.IO) {
+                        FocusScoreCalculator.calculate(context, rules)
+                    }
                 }
             }
         }
@@ -121,6 +145,67 @@ fun FocusGuardScreen() {
                 .padding(horizontal = 16.dp)
                 .fillMaxSize()
         ) {
+            // Focus Score Card
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .padding(14.dp)
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val scoreColor = when {
+                        focusSummary.score >= 80 -> Color(0xFF2E7D32)
+                        focusSummary.score >= 50 -> Color(0xFFF57F17)
+                        else -> Color(0xFFC62828)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .background(color = scoreColor, shape = CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "${focusSummary.score}%",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    }
+
+                    Spacer(Modifier.width(14.dp))
+
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Daily Focus Score",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        val statusText = when {
+                            focusSummary.trackedAppsCount == 0 -> "Set up daily limits & schedules below"
+                            focusSummary.score >= 80 -> "Great focus today! 🎯"
+                            focusSummary.score >= 50 -> "Approaching daily limits ⏳"
+                            else -> "Focus limit exceeded ⚠️"
+                        }
+                        Text(
+                            statusText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "${focusSummary.totalDistractionMinutes}m used today • ${focusSummary.activeSchedulesCount} schedule(s) active",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+
+            // Quick Permission Status Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -236,9 +321,9 @@ fun FocusGuardScreen() {
                                     )
                                     if (existing != null) {
                                         val limitText = existing.target.dailyLimitMinutes?.let { "${it}m/day" }
-                                            ?: "No daily limit"
+                                            ?: "No limit"
                                         val schedText = if (existing.schedules.isNotEmpty()) {
-                                            " • ${existing.schedules.size} schedule(s)"
+                                            " • " + ScheduleHelper.formatScheduleSummary(existing.schedules.first())
                                         } else ""
                                         Text(
                                             text = "Active: $limitText$schedText",
@@ -314,6 +399,8 @@ fun RuleConfigDialog(
     var enableSchedule by remember {
         mutableStateOf(existingSchedule != null || existingRule == null)
     }
+
+    // Default to Weekdays (Mon-Fri: 1+2+4+8+16 = 31)
     var selectedDays by remember {
         mutableStateOf(
             if (existingSchedule != null) {
@@ -323,21 +410,39 @@ fun RuleConfigDialog(
             }
         )
     }
-    var startHour by remember {
-        mutableStateOf(String.format("%02d", (existingSchedule?.startMinuteOfDay ?: 540) / 60))
+
+    // Default to 7:00 PM (1140) to 6:00 PM (1080)
+    val initialStart = existingSchedule?.startMinuteOfDay ?: 1140
+    val initialEnd = existingSchedule?.endMinuteOfDay ?: 1080
+
+    val (initStartH, initStartM, initStartPm) = remember(existingSchedule) {
+        ScheduleHelper.splitMinutesTo12h(initialStart)
     }
-    var startMinute by remember {
-        mutableStateOf(String.format("%02d", (existingSchedule?.startMinuteOfDay ?: 540) % 60))
-    }
-    var endHour by remember {
-        mutableStateOf(String.format("%02d", (existingSchedule?.endMinuteOfDay ?: 1020) / 60))
-    }
-    var endMinute by remember {
-        mutableStateOf(String.format("%02d", (existingSchedule?.endMinuteOfDay ?: 1020) % 60))
+    val (initEndH, initEndM, initEndPm) = remember(existingSchedule) {
+        ScheduleHelper.splitMinutesTo12h(initialEnd)
     }
 
+    var startHourText by remember { mutableStateOf(initStartH.toString()) }
+    var startMinuteText by remember { mutableStateOf(String.format("%02d", initStartM)) }
+    var startIsPm by remember { mutableStateOf(initStartPm) }
+
+    var endHourText by remember { mutableStateOf(initEndH.toString()) }
+    var endMinuteText by remember { mutableStateOf(String.format("%02d", initEndM)) }
+    var endIsPm by remember { mutableStateOf(initEndPm) }
+
     val dayOptions = listOf(
-        "M" to 1, "T" to 2, "W" to 4, "T" to 8, "F" to 16, "S" to 32, "S" to 64
+        "Mon" to 1, "Tue" to 2, "Wed" to 4, "Thu" to 8, "Fri" to 16, "Sat" to 32, "Sun" to 64
+    )
+
+    val curStartMin = ScheduleHelper.parseTimeToMinutes(
+        startHourText.toIntOrNull() ?: 7,
+        startMinuteText.toIntOrNull() ?: 0,
+        startIsPm
+    )
+    val curEndMin = ScheduleHelper.parseTimeToMinutes(
+        endHourText.toIntOrNull() ?: 6,
+        endMinuteText.toIntOrNull() ?: 0,
+        endIsPm
     )
 
     AlertDialog(
@@ -356,17 +461,23 @@ fun RuleConfigDialog(
             }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = enableDailyLimit, onCheckedChange = { enableDailyLimit = it })
-                    Text("Daily Time Limit (Minutes)")
+                    Text("Daily Time Limit (Minutes)", fontWeight = FontWeight.SemiBold)
                 }
                 if (enableDailyLimit) {
                     OutlinedTextField(
                         value = dailyMinutesText,
                         onValueChange = { dailyMinutesText = it.filter { ch -> ch.isDigit() } },
                         label = { Text("Minutes per day") },
-                        singleLine = true
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
 
@@ -374,10 +485,35 @@ fun RuleConfigDialog(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = enableSchedule, onCheckedChange = { enableSchedule = it })
-                    Text("Day & Time Window Block")
+                    Text("Day & Time Window Block", fontWeight = FontWeight.SemiBold)
                 }
+
                 if (enableSchedule) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // Day Presets
+                    Text("Day Presets:", style = MaterialTheme.typography.labelMedium)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AssistChip(
+                            onClick = { selectedDays = setOf(1, 2, 4, 8, 16) },
+                            label = { Text("Weekdays") }
+                        )
+                        AssistChip(
+                            onClick = { selectedDays = setOf(32, 64) },
+                            label = { Text("Weekends") }
+                        )
+                        AssistChip(
+                            onClick = { selectedDays = setOf(1, 2, 4, 8, 16, 32, 64) },
+                            label = { Text("Everyday") }
+                        )
+                    }
+
+                    // Individual Days
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         dayOptions.forEach { (label, bit) ->
                             val isSelected = bit in selectedDays
                             FilterChip(
@@ -385,37 +521,162 @@ fun RuleConfigDialog(
                                 onClick = {
                                     selectedDays = if (isSelected) selectedDays - bit else selectedDays + bit
                                 },
-                                label = { Text(label) }
+                                label = { Text(label, fontSize = 11.sp) },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp)
                             )
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+
+                    Spacer(Modifier.height(4.dp))
+                    Text("Time Presets:", style = MaterialTheme.typography.labelMedium)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AssistChip(
+                            onClick = {
+                                startHourText = "7"
+                                startMinuteText = "00"
+                                startIsPm = true
+                                endHourText = "6"
+                                endMinuteText = "00"
+                                endIsPm = true
+                            },
+                            label = { Text("7 PM - 6 PM") }
+                        )
+                        AssistChip(
+                            onClick = {
+                                startHourText = "7"
+                                startMinuteText = "00"
+                                startIsPm = true
+                                endHourText = "6"
+                                endMinuteText = "00"
+                                endIsPm = false
+                            },
+                            label = { Text("7 PM - 6 AM") }
+                        )
+                        AssistChip(
+                            onClick = {
+                                startHourText = "9"
+                                startMinuteText = "00"
+                                startIsPm = false
+                                endHourText = "5"
+                                endMinuteText = "00"
+                                endIsPm = true
+                            },
+                            label = { Text("9 AM - 5 PM") }
+                        )
+                    }
+
+                    // Start Time Input
+                    Text("Start Time", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         OutlinedTextField(
-                            value = "$startHour:$startMinute",
-                            onValueChange = {
-                                val parts = it.split(":")
-                                if (parts.size == 2) {
-                                    startHour = parts[0].take(2)
-                                    startMinute = parts[1].take(2)
-                                }
+                            value = startHourText,
+                            onValueChange = { input ->
+                                val num = input.filter { it.isDigit() }.take(2)
+                                startHourText = num
                             },
                             modifier = Modifier.weight(1f),
-                            label = { Text("Start (HH:MM)") },
+                            label = { Text("Hour (1-12)") },
                             singleLine = true
                         )
                         OutlinedTextField(
-                            value = "$endHour:$endMinute",
-                            onValueChange = {
-                                val parts = it.split(":")
-                                if (parts.size == 2) {
-                                    endHour = parts[0].take(2)
-                                    endMinute = parts[1].take(2)
-                                }
+                            value = startMinuteText,
+                            onValueChange = { input ->
+                                val num = input.filter { it.isDigit() }.take(2)
+                                startMinuteText = num
                             },
                             modifier = Modifier.weight(1f),
-                            label = { Text("End (HH:MM)") },
+                            label = { Text("Min (00-59)") },
                             singleLine = true
                         )
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            FilterChip(
+                                selected = !startIsPm,
+                                onClick = { startIsPm = false },
+                                label = { Text("AM") }
+                            )
+                            FilterChip(
+                                selected = startIsPm,
+                                onClick = { startIsPm = true },
+                                label = { Text("PM") }
+                            )
+                        }
+                    }
+
+                    // End Time Input
+                    Text("End Time", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = endHourText,
+                            onValueChange = { input ->
+                                val num = input.filter { it.isDigit() }.take(2)
+                                endHourText = num
+                            },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("Hour (1-12)") },
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = endMinuteText,
+                            onValueChange = { input ->
+                                val num = input.filter { it.isDigit() }.take(2)
+                                endMinuteText = num
+                            },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("Min (00-59)") },
+                            singleLine = true
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            FilterChip(
+                                selected = !endIsPm,
+                                onClick = { endIsPm = false },
+                                label = { Text("AM") }
+                            )
+                            FilterChip(
+                                selected = endIsPm,
+                                onClick = { endIsPm = true },
+                                label = { Text("PM") }
+                            )
+                        }
+                    }
+
+                    // Live Schedule Preview Card
+                    val dummySchedule = BlockSchedule(
+                        targetPackage = app.packageName,
+                        daysOfWeekMask = selectedDays.sum(),
+                        startMinuteOfDay = curStartMin,
+                        endMinuteOfDay = curEndMin
+                    )
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Text(
+                                ScheduleHelper.formatScheduleSummary(dummySchedule),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            if (curStartMin > curEndMin) {
+                                Text(
+                                    "🌙 Overnight window: blocks from evening across into the following day.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -424,11 +685,7 @@ fun RuleConfigDialog(
             Button(onClick = {
                 val mins = if (enableDailyLimit) dailyMinutesText.toIntOrNull() else null
                 val mask = selectedDays.sum()
-                val sMin = (startHour.toIntOrNull() ?: 9).coerceIn(0, 23) * 60 +
-                    (startMinute.toIntOrNull() ?: 0).coerceIn(0, 59)
-                val eMin = (endHour.toIntOrNull() ?: 17).coerceIn(0, 23) * 60 +
-                    (endMinute.toIntOrNull() ?: 0).coerceIn(0, 59)
-                onSave(mins, mask, sMin, eMin, enableSchedule)
+                onSave(mins, mask, curStartMin, curEndMin, enableSchedule)
             }) { Text("Save") }
         },
         dismissButton = {
